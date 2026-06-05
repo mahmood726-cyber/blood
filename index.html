@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <title>TransfusionSynth V1.2: Validated Engine</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@300;400;500;600;700&family=Merriweather:wght@300;400;700&display=swap" rel="stylesheet">
+  <!-- fonts removed for offline use -->
   <style>
     :root {
       --bg-dark: #09090b;
@@ -260,8 +260,16 @@
   </aside>
 </div>
 
+<!-- pure statistical core — single source of truth, shared by page + worker -->
+<script src="engine.js"></script>
+
 <!-- WORKER SCRIPT -->
 <script id="worker-code" type="javascript/worker">
+  // The worker is a separate realm; pull in the shared deterministic core.
+  // ENGINE_URL is injected by the page (absolute URL to engine.js) before the
+  // worker Blob is built, so importScripts resolves regardless of page path.
+  importScripts(ENGINE_URL_PLACEHOLDER);
+
   self.onmessage = function(e) {
     const { trials, config, patient } = e.data;
     
@@ -432,41 +440,7 @@
     };
   }
 
-  function metaAnalysisDL(groupTrials) {
-    if(groupTrials.length === 0) return { mean:0, se:0, lo:0, hi:0 };
-    
-    let num=0, den=0;
-    // FE Weights for Q
-    groupTrials.forEach(t => {
-      const w = 1/t.varLogRR;
-      num += t.logRR * w;
-      den += w;
-    });
-    const muFE = num/den;
-    
-    // Q & Tau2
-    const Q = groupTrials.reduce((acc, t) => acc + (1/t.varLogRR) * Math.pow(t.logRR - muFE, 2), 0);
-    const df = Math.max(1, groupTrials.length - 1);
-    const C = den - groupTrials.reduce((acc, t) => acc + Math.pow(1/t.varLogRR, 2), 0) / den;
-    const tau2 = Math.max(0, (Q - df) / C);
-    
-    // RE Weights
-    num=0; den=0;
-    groupTrials.forEach(t => {
-      const w = 1 / (t.varLogRR + tau2);
-      num += t.logRR * w;
-      den += w;
-    });
-    const muRE = num/den;
-    const seRE = Math.sqrt(1/den);
-    
-    return {
-      mean: muRE,
-      se: seRE,
-      lo: muRE - 1.96*seRE,
-      hi: muRE + 1.96*seRE
-    };
-  }
+  // metaAnalysisDL is provided by engine.js (importScripts above).
 
   function generateNormalSamples(mean, sd, n) {
     const arr = [];
@@ -474,36 +448,7 @@
     return arr;
   }
 
-  function runDiagnostics(trials, results) {
-    // I2 Calculation (approx)
-    let Q = 0;
-    const mu = results.logRR.mean;
-    trials.forEach(t => {
-       Q += (1/t.varLogRR) * Math.pow(t.logRR - mu, 2);
-    });
-    const df = Math.max(1, trials.length - 1);
-    const I2 = Math.max(0, (Q - df) / Q) * 100;
-
-    // Egger's Test (Calculated)
-    const x = [], y = [];
-    trials.forEach(t => {
-       const se = Math.sqrt(t.varLogRR);
-       x.push(1/se);
-       y.push(t.logRR/se);
-    });
-    const n = trials.length;
-    const sumX = x.reduce((a,b)=>a+b,0), sumY = y.reduce((a,b)=>a+b,0);
-    const sumXY = x.reduce((a,b,i)=>a+b*y[i],0), sumXX = x.reduce((a,b)=>a+b*b,0);
-    const slope = (n*sumXY - sumX*sumY) / (n*sumXX - sumX*sumX);
-    const intercept = (sumY - slope*sumX) / n;
-    const pVal = Math.abs(intercept) > 1.5 ? 0.04 : 0.25; // Approximate p-val mapping for UI
-
-    return {
-      I2: I2.toFixed(1) + "%",
-      egger: pVal < 0.05 ? `p=${pVal} (Bias)` : `p=${pVal} (No Bias)`,
-      eggerP: pVal
-    };
-  }
+  // runDiagnostics (I^2 + Egger) is provided by engine.js (importScripts above).
 
   function logLikelihoodDual(trials, muACS, muStable, tau) {
     let ll = 0;
@@ -551,7 +496,12 @@
     patient: { type: 'Stable', shock: false, hgb: 7.5 }
   };
 
-  const workerBlob = new Blob([document.getElementById('worker-code').textContent], {type: "text/javascript"});
+  // Resolve engine.js to an absolute URL and inject it into the worker source so
+  // the worker (a separate realm) shares the same single statistical core.
+  const engineURL = new URL('engine.js', document.baseURI).href;
+  const workerSrc = document.getElementById('worker-code').textContent
+    .replace('ENGINE_URL_PLACEHOLDER', JSON.stringify(engineURL));
+  const workerBlob = new Blob([workerSrc], {type: "text/javascript"});
   const worker = new Worker(URL.createObjectURL(workerBlob));
 
   // UI INIT
